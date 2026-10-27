@@ -66,8 +66,8 @@ jobs:
                   applicationId "com.smartbolus.app"
                   minSdk 24
                   targetSdk 34
-                  versionCode 18
-                  versionName "1.7.2"
+                  versionCode 19
+                  versionName "1.7.3"
               }
 
               buildTypes {
@@ -89,6 +89,13 @@ jobs:
 
               <uses-permission android:name="android.permission.INTERNET" />
               <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+              <!-- Обязательное разрешение для отправки инсулина и углеводов в xDrip+ (NSClient) -->
+              <uses-permission android:name="com.eveningoutpost.dexdrip.permissions.RECEIVE_NSCLIENT" />
+
+              <!-- Разрешение видимости пакета xDrip+ для Android 11 / 12 / 13 / 14 -->
+              <queries>
+                  <package android:name="com.eveningoutpost.dexdrip" />
+              </queries>
 
               <application
                   android:allowBackup="true"
@@ -169,6 +176,7 @@ jobs:
               private Uri cameraImageUri;
               private SharedPreferences prefs;
               private final Handler mainHandler = new Handler(Looper.getMainLooper());
+              private long lastXdripSentTime = 0;
 
               private static final String BRIDGE_SCRIPT =
                       "<script>\n" +
@@ -236,12 +244,20 @@ jobs:
                           if (uri != null) {
                               String urlStr = uri.toString();
                               if (urlStr.contains("smartbolus-xdrip")) {
+                                  String insStr = uri.getQueryParameter("insulin");
+                                  String carbsStr = uri.getQueryParameter("carbs");
+                                  String notesStr = uri.getQueryParameter("notes");
+                                  double ins = 0;
+                                  double carbs = 0;
+                                  try { if (insStr != null) ins = Double.parseDouble(insStr); } catch (Exception ignored) {}
+                                  try { if (carbsStr != null) carbs = Double.parseDouble(carbsStr); } catch (Exception ignored) {}
+                                  sendTreatmentToXDrip(ins, carbs, notesStr);
+
                                   Map<String, String> headers = new HashMap<>();
                                   headers.put("Access-Control-Allow-Origin", "*");
                                   ByteArrayInputStream stream = new ByteArrayInputStream("{\"ok\":true}".getBytes(StandardCharsets.UTF_8));
                                   return new WebResourceResponse("application/json", "UTF-8", 200, "OK", headers, stream);
                               }
-                              // Прямой прокси к локальному серверу xDrip+ без ограничений CORS
                               if (urlStr.contains("127.0.0.1:17580")) {
                                   try {
                                       String json = fetchHttpUrl(urlStr);
@@ -286,7 +302,6 @@ jobs:
                                   if (cameraImageUri != null) {
                                       chooserIntent.putExtra(Intent.EXTRA_INITIAL_INTENTS, new Intent[]{captureIntent});
                                   }
-                                  startActivityForResult(chooserIntent, FILE_CHOOSER_RESULT_CODE);
                               }
                               return true;
                           } catch (Exception e) {
@@ -302,7 +317,7 @@ jobs:
                       fetchLatestHtmlFromServer(false);
                   } else {
                       String loadingHtml = "<html><body style='background:#1C1C1E;color:#fff;font-family:sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;margin:0;text-align:center;padding:20px;'>" +
-                              "<h2>🤖 Умный Болюс</h2><p style='color:#98989F;'>Первая загрузка интерфейса с вашего сервера...</p></body></html>";
+                              "<h2>🤖 Умный Болюс</h2><p style='color:#98989F;'>Загрузка интерфейса...</p></body></html>";
                       webView.loadDataWithBaseURL("https://smartbolus.local/", loadingHtml, "text/html", "UTF-8", null);
                       fetchLatestHtmlFromServer(true);
                   }
@@ -338,30 +353,8 @@ jobs:
                                           }
                                       });
                                   }
-                              } else if (forceRender) {
-                                  mainHandler.post(new Runnable() {
-                                      @Override
-                                      public void run() {
-                                          String warnHtml = "<html><body style='background:#1C1C1E;color:#fff;font-family:sans-serif;padding:24px;line-height:1.5;'>" +
-                                                  "<h3>⚠️ Почти готово!</h3>" +
-                                                  "<p>Обновите файл <b>Код.gs</b> на сайте script.google.com и обязательно выберите:<br><br>" +
-                                                  "<b>Развернуть → Управление развертываниями → Карандаш ✏️ → Новая версия → Начать развертывание</b>.</p>" +
-                                                  "<button onclick='location.reload()' style='background:#0A84FF;color:#fff;border:none;padding:14px 20px;border-radius:12px;font-size:16px;font-weight:bold;width:100%;margin-top:12px;'>🔄 Проверить снова</button>" +
-                                                  "</body></html>";
-                                          webView.loadDataWithBaseURL("https://smartbolus.local/", warnHtml, "text/html", "UTF-8", null);
-                                      }
-                                  });
                               }
-                          } catch (final Exception e) {
-                              if (forceRender) {
-                                  mainHandler.post(new Runnable() {
-                                      @Override
-                                      public void run() {
-                                          Toast.makeText(MainActivity.this, "Ошибка сети: " + e.getMessage(), Toast.LENGTH_LONG).show();
-                                      }
-                                  });
-                              }
-                          }
+                          } catch (final Exception ignored) {}
                       }
                   }).start();
               }
@@ -399,7 +392,6 @@ jobs:
               public class WebAppInterface {
                   @JavascriptInterface
                   public void callServer(final int cbId, final String action, final String payload) {
-                      // Если добавляется запись об уколе или еде — сразу передаем её в xDrip+
                       if ("addRecord".equals(action) && payload != null && !payload.isEmpty()) {
                           try {
                               JSONObject rec = new JSONObject(payload);
@@ -445,43 +437,46 @@ jobs:
                   }
               }
 
-              private void sendTreatmentToXDrip(final double insulin, final double carbs, final String notes) {
+              private synchronized void sendTreatmentToXDrip(final double insulin, final double carbs, final String notes) {
                   if (insulin <= 0 && carbs <= 0) return;
+                  long now = System.currentTimeMillis();
+                  // Защита от двойной отправки одной и той же записи
+                  if (now - lastXdripSentTime < 2500) return;
+                  lastXdripSentTime = now;
+
                   try {
-                      long now = System.currentTimeMillis();
                       SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US);
                       sdf.setTimeZone(TimeZone.getTimeZone("UTC"));
 
+                      String rawUuid = UUID.randomUUID().toString();
+                      String mongoId = rawUuid.replace("-", "").substring(0, 24);
+
                       JSONObject tx = new JSONObject();
+                      tx.put("_id", mongoId);
+                      tx.put("uuid", rawUuid);
                       tx.put("timestamp", now);
+                      tx.put("date", now);
                       tx.put("created_at", sdf.format(new Date(now)));
                       tx.put("eventType", (insulin > 0 && carbs > 0) ? "Meal Bolus" : (insulin > 0 ? "Correction Bolus" : "Carb Correction"));
                       if (insulin > 0) tx.put("insulin", insulin);
                       if (carbs > 0) tx.put("carbs", carbs);
                       tx.put("notes", notes != null ? notes : "Умный Болюс");
-                      tx.put("enteredBy", "SmartBolus");
-                      tx.put("uuid", UUID.randomUUID().toString());
+                      tx.put("enteredBy", "NSClient");
 
                       JSONArray arr = new JSONArray();
                       arr.put(tx);
 
-                      Intent intent1 = new Intent("com.eveningoutpost.dexdrip.NS_EMULATOR");
-                      intent1.setPackage("com.eveningoutpost.dexdrip");
-                      intent1.putExtra("collection", "treatments");
-                      intent1.putExtra("data", arr.toString());
-                      intent1.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
-                      sendBroadcast(intent1);
-
-                      Intent intent2 = new Intent("com.eveningoutpost.dexdrip.NS_EMULATOR");
-                      intent2.putExtra("collection", "treatments");
-                      intent2.putExtra("data", arr.toString());
-                      intent2.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
-                      sendBroadcast(intent2);
+                      Intent intent = new Intent("com.eveningoutpost.dexdrip.NS_EMULATOR");
+                      intent.setPackage("com.eveningoutpost.dexdrip");
+                      intent.putExtra("collection", "treatments");
+                      intent.putExtra("data", arr.toString());
+                      intent.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
+                      sendBroadcast(intent);
 
                       mainHandler.post(new Runnable() {
                           @Override
                           public void run() {
-                              String msg = "💉 Передано в xDrip+: " +
+                              String msg = "💉 Отправлено в xDrip+: " +
                                       (insulin > 0 ? insulin + " ед. " : "") +
                                       (carbs > 0 ? (int) carbs + " г угл." : "");
                               Toast.makeText(getApplicationContext(), msg, Toast.LENGTH_LONG).show();
