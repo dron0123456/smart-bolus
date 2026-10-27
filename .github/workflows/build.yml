@@ -42,8 +42,8 @@ jobs:
                   applicationId "com.smartbolus.app"
                   minSdk 24
                   targetSdk 34
-                  versionCode 21
-                  versionName "1.7.5"
+                  versionCode 22
+                  versionName "1.7.6"
               }
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
@@ -58,8 +58,10 @@ jobs:
               <uses-permission android:name="android.permission.INTERNET" />
               <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
               <uses-permission android:name="com.eveningoutpost.dexdrip.permissions.RECEIVE_NSCLIENT" />
+              <uses-permission android:name="com.eveningoutpost.dexdrip.permissions.RECEIVE_EXTERNAL_STATUSLINE" />
               <queries>
                   <package android:name="com.eveningoutpost.dexdrip" />
+                  <intent><action android:name="com.eveningoutpost.dexdrip.NS_EMULATOR" /></intent>
                   <intent><action android:name="android.media.action.IMAGE_CAPTURE" /></intent>
               </queries>
               <application
@@ -87,13 +89,13 @@ jobs:
 
           import android.app.Activity;
           import android.app.AlertDialog;
-          import android.content.ClipData;
           import android.content.ComponentName;
           import android.content.ContentValues;
           import android.content.Context;
           import android.content.DialogInterface;
           import android.content.Intent;
           import android.content.SharedPreferences;
+          import android.content.pm.ResolveInfo;
           import android.net.Uri;
           import android.os.Bundle;
           import android.os.Handler;
@@ -108,7 +110,6 @@ jobs:
           import android.webkit.WebSettings;
           import android.webkit.WebView;
           import android.webkit.WebViewClient;
-          import android.widget.EditText;
           import android.widget.Toast;
           import org.json.JSONArray;
           import org.json.JSONObject;
@@ -121,8 +122,10 @@ jobs:
           import java.net.URLEncoder;
           import java.nio.charset.StandardCharsets;
           import java.text.SimpleDateFormat;
+          import java.util.Calendar;
           import java.util.Date;
           import java.util.HashMap;
+          import java.util.List;
           import java.util.Locale;
           import java.util.Map;
           import java.util.TimeZone;
@@ -188,7 +191,6 @@ jobs:
                           filePathCallback = cb;
                           try {
                               if (params != null && params.isCaptureEnabled()) {
-                                  // Нажата кнопка "Камера" -> открываем сразу камеру
                                   Intent captureIntent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
                                   ContentValues values = new ContentValues();
                                   values.put(MediaStore.Images.Media.TITLE, "sb_" + System.currentTimeMillis() + ".jpg");
@@ -197,7 +199,6 @@ jobs:
                                   if (cameraImageUri != null) captureIntent.putExtra(MediaStore.EXTRA_OUTPUT, cameraImageUri);
                                   startActivityForResult(captureIntent, FILE_CHOOSER_RESULT_CODE);
                               } else {
-                                  // Нажата кнопка "Из галереи" -> открываем сразу галерею фото
                                   cameraImageUri = null;
                                   Intent pickIntent = new Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI);
                                   pickIntent.setType("image/*");
@@ -271,6 +272,17 @@ jobs:
 
               public class WebAppInterface {
                   @JavascriptInterface
+                  public String getPhoneTimeStr() {
+                      return new SimpleDateFormat("HH:mm", Locale.getDefault()).format(new Date());
+                  }
+
+                  @JavascriptInterface
+                  public double getPhoneHourFloat() {
+                      Calendar cal = Calendar.getInstance();
+                      return cal.get(Calendar.HOUR_OF_DAY) + (cal.get(Calendar.MINUTE) / 60.0);
+                  }
+
+                  @JavascriptInterface
                   public void callServer(final int cbId, final String action, final String payload) {
                       if ("addRecord".equals(action) && payload != null) {
                           try {
@@ -279,7 +291,8 @@ jobs:
                               if ("bolus".equals(type) || "food_only".equals(type)) {
                                   double units = rec.optDouble("units", 0);
                                   double xe = Double.parseDouble(rec.optString("xe", "0").replace(",", "."));
-                                  sendTreatmentToXDrip(units, Math.round(xe * 10.0), rec.optString("note", ""));
+                                  double carbs = rec.has("carbs") ? rec.optDouble("carbs", Math.round(xe * 10.0)) : Math.round(xe * 10.0);
+                                  sendTreatmentToXDrip(units, carbs, rec.optString("note", ""));
                               }
                           } catch (Exception ignored) {}
                       }
@@ -313,25 +326,45 @@ jobs:
 
                       JSONObject tx = new JSONObject();
                       tx.put("_id", rawUuid.replace("-", "").substring(0, 24));
-                      tx.put("uuid", rawUuid);
                       tx.put("timestamp", now);
                       tx.put("created_at", sdf.format(new Date(now)));
-                      tx.put("eventType", "Treatment");
-                      tx.put("insulin", insulin);
-                      tx.put("carbs", carbs);
+                      tx.put("eventType", (insulin > 0 && carbs > 0) ? "Meal Bolus" : (insulin > 0 ? "Correction Bolus" : "Carb Correction"));
+                      if (insulin > 0) tx.put("insulin", insulin);
+                      if (carbs > 0) tx.put("carbs", carbs);
                       tx.put("notes", notes != null ? notes : "");
                       tx.put("enteredBy", "NSClient");
 
                       JSONArray arr = new JSONArray();
                       arr.put(tx);
+                      String dataStr = arr.toString();
 
-                      // Прямая адресная доставка в приемник NSClientReceiver внутри xDrip+ (для Huawei/Honor)
-                      Intent intent = new Intent("com.eveningoutpost.dexdrip.NS_EMULATOR");
-                      intent.setComponent(new ComponentName("com.eveningoutpost.dexdrip", "com.eveningoutpost.dexdrip.UtilityModels.NSClientReceiver"));
-                      intent.putExtra("collection", "treatments");
-                      intent.putExtra("data", arr.toString());
-                      intent.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
-                      sendBroadcast(intent);
+                      // 1. Автопоиск всех приемников NS_EMULATOR внутри установленного xDrip+
+                      Intent queryIntent = new Intent("com.eveningoutpost.dexdrip.NS_EMULATOR");
+                      List<ResolveInfo> receivers = getPackageManager().queryBroadcastReceivers(queryIntent, 0);
+                      if (receivers != null && !receivers.isEmpty()) {
+                          for (ResolveInfo info : receivers) {
+                              Intent explicitIntent = new Intent("com.eveningoutpost.dexdrip.NS_EMULATOR");
+                              explicitIntent.setComponent(new ComponentName(info.activityInfo.packageName, info.activityInfo.name));
+                              explicitIntent.putExtra("collection", "treatments");
+                              explicitIntent.putExtra("data", dataStr);
+                              explicitIntent.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
+                              sendBroadcast(explicitIntent);
+                          }
+                      }
+
+                      // 2. Прямая отправка в оба возможных пути приемника xDrip+
+                      String[] classes = {
+                          "com.eveningoutpost.dexdrip.Services.NSClientReceiver",
+                          "com.eveningoutpost.dexdrip.UtilityModels.NSClientReceiver"
+                      };
+                      for (String cls : classes) {
+                          Intent i = new Intent("com.eveningoutpost.dexdrip.NS_EMULATOR");
+                          i.setComponent(new ComponentName("com.eveningoutpost.dexdrip", cls));
+                          i.putExtra("collection", "treatments");
+                          i.putExtra("data", dataStr);
+                          i.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
+                          sendBroadcast(i);
+                      }
 
                       mainHandler.post(new Runnable() {
                           @Override
