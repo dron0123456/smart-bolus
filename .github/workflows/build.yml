@@ -42,8 +42,8 @@ jobs:
                   applicationId "com.smartbolus.app"
                   minSdk 24
                   targetSdk 34
-                  versionCode 23
-                  versionName "1.7.7"
+                  versionCode 24
+                  versionName "1.7.8"
               }
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
@@ -58,11 +58,9 @@ jobs:
               <uses-permission android:name="android.permission.INTERNET" />
               <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
               <uses-permission android:name="com.eveningoutpost.dexdrip.permissions.RECEIVE_NSCLIENT" />
-              <uses-permission android:name="com.eveningoutpost.dexdrip.permissions.RECEIVE_EXTERNAL_STATUSLINE" />
               <queries>
                   <package android:name="com.eveningoutpost.dexdrip" />
                   <intent><action android:name="com.eveningoutpost.dexdrip.NS_EMULATOR" /></intent>
-                  <intent><action android:name="com.eveningoutpost.dexdrip.watch.wearintegration.BROADCAST_SERVICE_RECEIVER" /></intent>
                   <intent><action android:name="android.media.action.IMAGE_CAPTURE" /></intent>
               </queries>
               <application
@@ -134,7 +132,6 @@ jobs:
               private static final String DEFAULT_URL = "https://script.google.com/macros/s/AKfycby8RIP5UPNigRwb0jX6fSSVgS5O6WlyZmPS26LvTsAZI7hhthdtDcFHnEFNcPeF2nW_Aw/exec";
               private static final int FILE_CHOOSER_RESULT_CODE = 1001;
               private static final String XDRIP_PKG = "com.eveningoutpost.dexdrip";
-              private static final String ACTION_BS = "com.eveningoutpost.dexdrip.watch.wearintegration.BROADCAST_SERVICE_RECEIVER";
 
               private WebView webView;
               private ValueCallback<Uri[]> filePathCallback;
@@ -168,9 +165,6 @@ jobs:
 
                   CookieManager.getInstance().setAcceptCookie(true);
                   webView.addJavascriptInterface(new WebAppInterface(), "AndroidBridge");
-
-                  // Регистрируем наше приложение в службе BroadcastService xDrip+ при запуске
-                  registerInXdripBroadcastService();
 
                   webView.setWebViewClient(new WebViewClient() {
                       @Override
@@ -224,17 +218,6 @@ jobs:
                   } else {
                       fetchLatestHtml(true);
                   }
-              }
-
-              private void registerInXdripBroadcastService() {
-                  try {
-                      Intent reg = new Intent(ACTION_BS);
-                      reg.setPackage(XDRIP_PKG);
-                      reg.putExtra("PACKAGE", getPackageName());
-                      reg.putExtra("FUNCTION", "set_settings");
-                      reg.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
-                      sendBroadcast(reg);
-                  } catch (Exception ignored) {}
               }
 
               private void renderHtml(String rawHtml) {
@@ -337,49 +320,28 @@ jobs:
                   lastXdripSentTime = now;
 
                   try {
-                      // КАНАЛ 1: Официальный BroadcastService API xDrip+ (работает на любом источнике данных)
-                      registerInXdripBroadcastService();
-                      mainHandler.postDelayed(new Runnable() {
-                          @Override
-                          public void run() {
-                              try {
-                                  Intent bsIntent = new Intent(ACTION_BS);
-                                  bsIntent.setPackage(XDRIP_PKG);
-                                  bsIntent.putExtra("PACKAGE", getPackageName());
-                                  bsIntent.putExtra("FUNCTION", "add_treatment");
-                                  bsIntent.putExtra("carbs", (double) carbs);
-                                  bsIntent.putExtra("insulin", (double) insulin);
-                                  bsIntent.putExtra("timeStamp", now);
-                                  bsIntent.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
-                                  sendBroadcast(bsIntent);
-                              } catch (Exception ignored) {}
-                          }
-                      }, 350);
-
-                      // КАНАЛ 2: NSEmulatorReceiver (для режима Follower / NSClient)
                       SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US);
                       sdf.setTimeZone(TimeZone.getTimeZone("UTC"));
-                      String rawUuid = UUID.randomUUID().toString();
 
+                      // Строго одно поле _id (без дубликата uuid, чтобы Gson в xDrip+ не выдавал ошибку)
                       JSONObject tx = new JSONObject();
-                      tx.put("_id", rawUuid.replace("-", "").substring(0, 24));
-                      tx.put("uuid", rawUuid);
-                      tx.put("timestamp", now);
+                      tx.put("_id", UUID.randomUUID().toString());
                       tx.put("created_at", sdf.format(new Date(now)));
                       tx.put("eventType", (insulin > 0 && carbs > 0) ? "Meal Bolus" : (insulin > 0 ? "Correction Bolus" : "Carb Correction"));
-                      if (insulin > 0) tx.put("insulin", insulin);
-                      if (carbs > 0) tx.put("carbs", carbs);
+                      tx.put("carbs", (double) carbs);
+                      tx.put("insulin", (double) insulin);
                       tx.put("notes", notes != null ? notes : "");
-                      tx.put("enteredBy", "NSClient");
+                      tx.put("enteredBy", "SmartBolus");
 
                       JSONArray arr = new JSONArray();
                       arr.put(tx);
+                      String jsonData = arr.toString();
 
                       Intent nsIntent = new Intent("com.eveningoutpost.dexdrip.NS_EMULATOR");
                       nsIntent.setComponent(new ComponentName(XDRIP_PKG, "com.eveningoutpost.dexdrip.NSEmulatorReceiver"));
                       nsIntent.putExtra("collection", "treatments");
-                      nsIntent.putExtra("data", arr.toString());
-                      nsIntent.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
+                      nsIntent.putExtra("data", jsonData);
+                      nsIntent.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES | Intent.FLAG_RECEIVER_FOREGROUND);
                       sendBroadcast(nsIntent);
 
                       mainHandler.post(new Runnable() {
