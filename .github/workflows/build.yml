@@ -42,8 +42,8 @@ jobs:
                   applicationId "com.smartbolus.app"
                   minSdk 24
                   targetSdk 34
-                  versionCode 22
-                  versionName "1.7.6"
+                  versionCode 23
+                  versionName "1.7.7"
               }
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
@@ -62,6 +62,7 @@ jobs:
               <queries>
                   <package android:name="com.eveningoutpost.dexdrip" />
                   <intent><action android:name="com.eveningoutpost.dexdrip.NS_EMULATOR" /></intent>
+                  <intent><action android:name="com.eveningoutpost.dexdrip.watch.wearintegration.BROADCAST_SERVICE_RECEIVER" /></intent>
                   <intent><action android:name="android.media.action.IMAGE_CAPTURE" /></intent>
               </queries>
               <application
@@ -95,7 +96,6 @@ jobs:
           import android.content.DialogInterface;
           import android.content.Intent;
           import android.content.SharedPreferences;
-          import android.content.pm.ResolveInfo;
           import android.net.Uri;
           import android.os.Bundle;
           import android.os.Handler;
@@ -125,7 +125,6 @@ jobs:
           import java.util.Calendar;
           import java.util.Date;
           import java.util.HashMap;
-          import java.util.List;
           import java.util.Locale;
           import java.util.Map;
           import java.util.TimeZone;
@@ -134,6 +133,9 @@ jobs:
           public class MainActivity extends Activity {
               private static final String DEFAULT_URL = "https://script.google.com/macros/s/AKfycby8RIP5UPNigRwb0jX6fSSVgS5O6WlyZmPS26LvTsAZI7hhthdtDcFHnEFNcPeF2nW_Aw/exec";
               private static final int FILE_CHOOSER_RESULT_CODE = 1001;
+              private static final String XDRIP_PKG = "com.eveningoutpost.dexdrip";
+              private static final String ACTION_BS = "com.eveningoutpost.dexdrip.watch.wearintegration.BROADCAST_SERVICE_RECEIVER";
+
               private WebView webView;
               private ValueCallback<Uri[]> filePathCallback;
               private Uri cameraImageUri;
@@ -166,6 +168,9 @@ jobs:
 
                   CookieManager.getInstance().setAcceptCookie(true);
                   webView.addJavascriptInterface(new WebAppInterface(), "AndroidBridge");
+
+                  // Регистрируем наше приложение в службе BroadcastService xDrip+ при запуске
+                  registerInXdripBroadcastService();
 
                   webView.setWebViewClient(new WebViewClient() {
                       @Override
@@ -219,6 +224,17 @@ jobs:
                   } else {
                       fetchLatestHtml(true);
                   }
+              }
+
+              private void registerInXdripBroadcastService() {
+                  try {
+                      Intent reg = new Intent(ACTION_BS);
+                      reg.setPackage(XDRIP_PKG);
+                      reg.putExtra("PACKAGE", getPackageName());
+                      reg.putExtra("FUNCTION", "set_settings");
+                      reg.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
+                      sendBroadcast(reg);
+                  } catch (Exception ignored) {}
               }
 
               private void renderHtml(String rawHtml) {
@@ -316,16 +332,38 @@ jobs:
 
               private synchronized void sendTreatmentToXDrip(final double insulin, final double carbs, final String notes) {
                   if (insulin <= 0 && carbs <= 0) return;
-                  long now = System.currentTimeMillis();
+                  final long now = System.currentTimeMillis();
                   if (now - lastXdripSentTime < 2000) return;
                   lastXdripSentTime = now;
+
                   try {
+                      // КАНАЛ 1: Официальный BroadcastService API xDrip+ (работает на любом источнике данных)
+                      registerInXdripBroadcastService();
+                      mainHandler.postDelayed(new Runnable() {
+                          @Override
+                          public void run() {
+                              try {
+                                  Intent bsIntent = new Intent(ACTION_BS);
+                                  bsIntent.setPackage(XDRIP_PKG);
+                                  bsIntent.putExtra("PACKAGE", getPackageName());
+                                  bsIntent.putExtra("FUNCTION", "add_treatment");
+                                  bsIntent.putExtra("carbs", (double) carbs);
+                                  bsIntent.putExtra("insulin", (double) insulin);
+                                  bsIntent.putExtra("timeStamp", now);
+                                  bsIntent.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
+                                  sendBroadcast(bsIntent);
+                              } catch (Exception ignored) {}
+                          }
+                      }, 350);
+
+                      // КАНАЛ 2: NSEmulatorReceiver (для режима Follower / NSClient)
                       SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US);
                       sdf.setTimeZone(TimeZone.getTimeZone("UTC"));
                       String rawUuid = UUID.randomUUID().toString();
 
                       JSONObject tx = new JSONObject();
                       tx.put("_id", rawUuid.replace("-", "").substring(0, 24));
+                      tx.put("uuid", rawUuid);
                       tx.put("timestamp", now);
                       tx.put("created_at", sdf.format(new Date(now)));
                       tx.put("eventType", (insulin > 0 && carbs > 0) ? "Meal Bolus" : (insulin > 0 ? "Correction Bolus" : "Carb Correction"));
@@ -336,35 +374,13 @@ jobs:
 
                       JSONArray arr = new JSONArray();
                       arr.put(tx);
-                      String dataStr = arr.toString();
 
-                      // 1. Автопоиск всех приемников NS_EMULATOR внутри установленного xDrip+
-                      Intent queryIntent = new Intent("com.eveningoutpost.dexdrip.NS_EMULATOR");
-                      List<ResolveInfo> receivers = getPackageManager().queryBroadcastReceivers(queryIntent, 0);
-                      if (receivers != null && !receivers.isEmpty()) {
-                          for (ResolveInfo info : receivers) {
-                              Intent explicitIntent = new Intent("com.eveningoutpost.dexdrip.NS_EMULATOR");
-                              explicitIntent.setComponent(new ComponentName(info.activityInfo.packageName, info.activityInfo.name));
-                              explicitIntent.putExtra("collection", "treatments");
-                              explicitIntent.putExtra("data", dataStr);
-                              explicitIntent.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
-                              sendBroadcast(explicitIntent);
-                          }
-                      }
-
-                      // 2. Прямая отправка в оба возможных пути приемника xDrip+
-                      String[] classes = {
-                          "com.eveningoutpost.dexdrip.Services.NSClientReceiver",
-                          "com.eveningoutpost.dexdrip.UtilityModels.NSClientReceiver"
-                      };
-                      for (String cls : classes) {
-                          Intent i = new Intent("com.eveningoutpost.dexdrip.NS_EMULATOR");
-                          i.setComponent(new ComponentName("com.eveningoutpost.dexdrip", cls));
-                          i.putExtra("collection", "treatments");
-                          i.putExtra("data", dataStr);
-                          i.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
-                          sendBroadcast(i);
-                      }
+                      Intent nsIntent = new Intent("com.eveningoutpost.dexdrip.NS_EMULATOR");
+                      nsIntent.setComponent(new ComponentName(XDRIP_PKG, "com.eveningoutpost.dexdrip.NSEmulatorReceiver"));
+                      nsIntent.putExtra("collection", "treatments");
+                      nsIntent.putExtra("data", arr.toString());
+                      nsIntent.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
+                      sendBroadcast(nsIntent);
 
                       mainHandler.post(new Runnable() {
                           @Override
