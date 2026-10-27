@@ -8,74 +8,43 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
 
-      - name: Generate Android Project Files
+      - name: Generate Project
         run: |
           mkdir -p app/src/main/java/com/smartbolus/app
 
           cat << 'EOF' > settings.gradle
-          pluginManagement {
-              repositories {
-                  google()
-                  mavenCentral()
-                  gradlePluginPortal()
-              }
-          }
-          dependencyResolutionManagement {
-              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-          }
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }
           rootProject.name = "SmartBolus"
           include ':app'
           EOF
 
           cat << 'EOF' > build.gradle
-          plugins {
-              id 'com.android.application' version '8.4.0' apply false
-          }
+          plugins { id 'com.android.application' version '8.4.0' apply false }
           EOF
 
           cat << 'EOF' > app/build.gradle
-          plugins {
-              id 'com.android.application'
-          }
-
+          plugins { id 'com.android.application' }
           android {
               namespace 'com.smartbolus.app'
               compileSdk 34
-
               defaultConfig {
                   applicationId "com.smartbolus.app"
                   minSdk 24
                   targetSdk 34
-                  versionCode 20
-                  versionName "1.7.4"
+                  versionCode 21
+                  versionName "1.7.5"
               }
-
-              buildTypes {
-                  debug {
-                      minifyEnabled false
-                  }
-              }
-
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
                   targetCompatibility JavaVersion.VERSION_17
@@ -86,15 +55,13 @@ jobs:
           cat << 'EOF' > app/src/main/AndroidManifest.xml
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-
               <uses-permission android:name="android.permission.INTERNET" />
               <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
               <uses-permission android:name="com.eveningoutpost.dexdrip.permissions.RECEIVE_NSCLIENT" />
-
               <queries>
                   <package android:name="com.eveningoutpost.dexdrip" />
+                  <intent><action android:name="android.media.action.IMAGE_CAPTURE" /></intent>
               </queries>
-
               <application
                   android:allowBackup="true"
                   android:label="Умный Болюс"
@@ -102,7 +69,6 @@ jobs:
                   android:usesCleartextTraffic="true"
                   android:hardwareAccelerated="true"
                   android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
-
                   <activity
                       android:name=".MainActivity"
                       android:exported="true"
@@ -113,7 +79,6 @@ jobs:
                       </intent-filter>
                   </activity>
               </application>
-
           </manifest>
           EOF
 
@@ -123,6 +88,7 @@ jobs:
           import android.app.Activity;
           import android.app.AlertDialog;
           import android.content.ClipData;
+          import android.content.ComponentName;
           import android.content.ContentValues;
           import android.content.Context;
           import android.content.DialogInterface;
@@ -144,10 +110,8 @@ jobs:
           import android.webkit.WebViewClient;
           import android.widget.EditText;
           import android.widget.Toast;
-
           import org.json.JSONArray;
           import org.json.JSONObject;
-
           import java.io.BufferedReader;
           import java.io.ByteArrayInputStream;
           import java.io.InputStream;
@@ -165,10 +129,8 @@ jobs:
           import java.util.UUID;
 
           public class MainActivity extends Activity {
-
               private static final String DEFAULT_URL = "https://script.google.com/macros/s/AKfycby8RIP5UPNigRwb0jX6fSSVgS5O6WlyZmPS26LvTsAZI7hhthdtDcFHnEFNcPeF2nW_Aw/exec";
               private static final int FILE_CHOOSER_RESULT_CODE = 1001;
-
               private WebView webView;
               private ValueCallback<Uri[]> filePathCallback;
               private Uri cameraImageUri;
@@ -177,95 +139,43 @@ jobs:
               private long lastXdripSentTime = 0;
 
               private static final String BRIDGE_SCRIPT =
-                      "<script>\n" +
-                      "(function(){\n" +
-                      "  window._callbacks = {};\n" +
-                      "  window._cbId = 0;\n" +
-                      "  window._callAndroidServer = function(action, payload, onSuccess, onFailure) {\n" +
-                      "    var id = ++window._cbId;\n" +
-                      "    window._callbacks[id] = { ok: onSuccess, err: onFailure };\n" +
-                      "    if (window.AndroidBridge && window.AndroidBridge.callServer) {\n" +
-                      "      window.AndroidBridge.callServer(id, action, payload || '');\n" +
-                      "    }\n" +
-                      "  };\n" +
-                      "  window._onAndroidServerResult = function(id, isOk, resBase64) {\n" +
-                      "    var cb = window._callbacks[id];\n" +
-                      "    delete window._callbacks[id];\n" +
-                      "    if (!cb) return;\n" +
-                      "    try {\n" +
-                      "      var decoded = decodeURIComponent(escape(window.atob(resBase64)));\n" +
-                      "      if (isOk && cb.ok) cb.ok(decoded);\n" +
-                      "      else if (!isOk && cb.err) cb.err(decoded);\n" +
-                      "    } catch (e) {\n" +
-                      "      if (cb.err) cb.err(e.toString());\n" +
-                      "    }\n" +
-                      "  };\n" +
-                      "  function createRunner(sFn, fFn) {\n" +
-                      "    return {\n" +
-                      "      withSuccessHandler: function(fn) { return createRunner(fn, fFn); },\n" +
-                      "      withFailureHandler: function(fn) { return createRunner(sFn, fn); },\n" +
-                      "      getAppState: function() { window._callAndroidServer('getState', '', sFn, fFn); },\n" +
-                      "      saveCloudSettings: function(s) { window._callAndroidServer('saveSettings', JSON.stringify(s), sFn, fFn); },\n" +
-                      "      addCloudRecord: function(r) { window._callAndroidServer('addRecord', JSON.stringify(r), sFn, fFn); },\n" +
-                      "      deleteCloudRecord: function(ts) { window._callAndroidServer('deleteRecord', String(ts), sFn, fFn); }\n" +
-                      "    };\n" +
-                      "  }\n" +
-                      "  window.google = { script: { run: createRunner(null, null) } };\n" +
-                      "})();\n" +
-                      "</script>";
+                      "<script>(function(){" +
+                      "window._callbacks={};window._cbId=0;" +
+                      "window._callAndroidServer=function(a,p,s,f){var id=++window._cbId;window._callbacks[id]={ok:s,err:f};if(window.AndroidBridge)window.AndroidBridge.callServer(id,a,p||'');};" +
+                      "window._onAndroidServerResult=function(id,ok,b64){var cb=window._callbacks[id];delete window._callbacks[id];if(!cb)return;try{var d=decodeURIComponent(escape(window.atob(b64)));if(ok&&cb.ok)cb.ok(d);else if(!ok&&cb.err)cb.err(d);}catch(e){if(cb.err)cb.err(e.toString());}};" +
+                      "function cr(s,f){return{withSuccessHandler:function(fn){return cr(fn,f);},withFailureHandler:function(fn){return cr(s,fn);},getAppState:function(){window._callAndroidServer('getState','',s,f);},saveCloudSettings:function(x){window._callAndroidServer('saveSettings',JSON.stringify(x),s,f);},addCloudRecord:function(r){window._callAndroidServer('addRecord',JSON.stringify(r),s,f);},deleteCloudRecord:function(t){window._callAndroidServer('deleteRecord',String(t),s,f);}};}" +
+                      "window.google={script:{run:cr(null,null)}};" +
+                      "})();</script>";
 
               @Override
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
-
                   prefs = getSharedPreferences("SmartBolusPrefs", Context.MODE_PRIVATE);
                   webView = new WebView(this);
                   setContentView(webView);
 
-                  WebSettings settings = webView.getSettings();
-                  settings.setJavaScriptEnabled(true);
-                  settings.setDomStorageEnabled(true);
-                  settings.setDatabaseEnabled(true);
-                  settings.setAllowFileAccess(true);
-                  settings.setAllowContentAccess(true);
-                  settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+                  WebSettings s = webView.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setAllowFileAccess(true);
+                  s.setAllowContentAccess(true);
+                  s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
 
                   CookieManager.getInstance().setAcceptCookie(true);
-                  CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
-
                   webView.addJavascriptInterface(new WebAppInterface(), "AndroidBridge");
 
                   webView.setWebViewClient(new WebViewClient() {
                       @Override
                       public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                           Uri uri = request.getUrl();
-                          if (uri != null) {
-                              String urlStr = uri.toString();
-                              if (urlStr.contains("smartbolus-xdrip")) {
-                                  String insStr = uri.getQueryParameter("insulin");
-                                  String carbsStr = uri.getQueryParameter("carbs");
-                                  String notesStr = uri.getQueryParameter("notes");
-                                  double ins = 0;
-                                  double carbs = 0;
-                                  try { if (insStr != null) ins = Double.parseDouble(insStr); } catch (Exception ignored) {}
-                                  try { if (carbsStr != null) carbs = Double.parseDouble(carbsStr); } catch (Exception ignored) {}
-                                  sendTreatmentToXDrip(ins, carbs, notesStr);
-
+                          if (uri != null && uri.toString().contains("127.0.0.1:17580")) {
+                              try {
+                                  String json = fetchHttpUrl(uri.toString());
                                   Map<String, String> headers = new HashMap<>();
                                   headers.put("Access-Control-Allow-Origin", "*");
-                                  ByteArrayInputStream stream = new ByteArrayInputStream("{\"ok\":true}".getBytes(StandardCharsets.UTF_8));
-                                  return new WebResourceResponse("application/json", "UTF-8", 200, "OK", headers, stream);
-                              }
-                              if (urlStr.contains("127.0.0.1:17580")) {
-                                  try {
-                                      String json = fetchHttpUrl(urlStr);
-                                      Map<String, String> headers = new HashMap<>();
-                                      headers.put("Access-Control-Allow-Origin", "*");
-                                      headers.put("Cache-Control", "no-store");
-                                      ByteArrayInputStream stream = new ByteArrayInputStream(json.getBytes(StandardCharsets.UTF_8));
-                                      return new WebResourceResponse("application/json", "UTF-8", 200, "OK", headers, stream);
-                                  } catch (Exception ignored) {}
-                              }
+                                  headers.put("Cache-Control", "no-store");
+                                  return new WebResourceResponse("application/json", "UTF-8", 200, "OK", headers, new ByteArrayInputStream(json.getBytes(StandardCharsets.UTF_8)));
+                              } catch (Exception ignored) {}
                           }
                           return super.shouldInterceptRequest(view, request);
                       }
@@ -273,34 +183,29 @@ jobs:
 
                   webView.setWebChromeClient(new WebChromeClient() {
                       @Override
-                      public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> filePathCallback, FileChooserParams fileChooserParams) {
-                          if (MainActivity.this.filePathCallback != null) {
-                              MainActivity.this.filePathCallback.onReceiveValue(null);
-                          }
-                          MainActivity.this.filePathCallback = filePathCallback;
-
+                      public boolean onShowFileChooser(WebView wv, ValueCallback<Uri[]> cb, FileChooserParams params) {
+                          if (filePathCallback != null) filePathCallback.onReceiveValue(null);
+                          filePathCallback = cb;
                           try {
-                              // Создаем стандартный системный выбор файлов/фото (галерея + камера)
-                              Intent contentIntent = new Intent(Intent.ACTION_GET_CONTENT);
-                              contentIntent.addCategory(Intent.CATEGORY_OPENABLE);
-                              contentIntent.setType("image/*");
-
-                              Intent captureIntent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
-                              ContentValues values = new ContentValues();
-                              values.put(MediaStore.Images.Media.TITLE, "smartbolus_" + System.currentTimeMillis() + ".jpg");
-                              values.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
-                              cameraImageUri = getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
-                              if (cameraImageUri != null) {
-                                  captureIntent.putExtra(MediaStore.EXTRA_OUTPUT, cameraImageUri);
+                              if (params != null && params.isCaptureEnabled()) {
+                                  // Нажата кнопка "Камера" -> открываем сразу камеру
+                                  Intent captureIntent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+                                  ContentValues values = new ContentValues();
+                                  values.put(MediaStore.Images.Media.TITLE, "sb_" + System.currentTimeMillis() + ".jpg");
+                                  values.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
+                                  cameraImageUri = getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
+                                  if (cameraImageUri != null) captureIntent.putExtra(MediaStore.EXTRA_OUTPUT, cameraImageUri);
+                                  startActivityForResult(captureIntent, FILE_CHOOSER_RESULT_CODE);
+                              } else {
+                                  // Нажата кнопка "Из галереи" -> открываем сразу галерею фото
+                                  cameraImageUri = null;
+                                  Intent pickIntent = new Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI);
+                                  pickIntent.setType("image/*");
+                                  startActivityForResult(pickIntent, FILE_CHOOSER_RESULT_CODE);
                               }
-
-                              Intent chooserIntent = Intent.createChooser(contentIntent, "Выберите фото или сделайте снимок");
-                              chooserIntent.putExtra(Intent.EXTRA_INITIAL_INTENTS, new Intent[]{captureIntent});
-
-                              startActivityForResult(chooserIntent, FILE_CHOOSER_RESULT_CODE);
                               return true;
                           } catch (Exception e) {
-                              MainActivity.this.filePathCallback = null;
+                              filePathCallback = null;
                               return false;
                           }
                       }
@@ -308,48 +213,33 @@ jobs:
 
                   String cachedHtml = prefs.getString("cached_html", null);
                   if (cachedHtml != null && !cachedHtml.isEmpty()) {
-                      renderHtmlInWebView(cachedHtml);
-                      fetchLatestHtmlFromServer(false);
+                      renderHtml(cachedHtml);
+                      fetchLatestHtml(false);
                   } else {
-                      String loadingHtml = "<html><body style='background:#1C1C1E;color:#fff;font-family:sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;margin:0;text-align:center;padding:20px;'>" +
-                              "<h2>🤖 Умный Болюс</h2><p style='color:#98989F;'>Загрузка интерфейса...</p></body></html>";
-                      webView.loadDataWithBaseURL("https://smartbolus.local/", loadingHtml, "text/html", "UTF-8", null);
-                      fetchLatestHtmlFromServer(true);
+                      fetchLatestHtml(true);
                   }
               }
 
-              private void renderHtmlInWebView(String rawHtml) {
-                  String fullHtml;
-                  if (rawHtml.contains("<head>")) {
-                      fullHtml = rawHtml.replace("<head>", "<head>" + BRIDGE_SCRIPT);
-                  } else {
-                      fullHtml = BRIDGE_SCRIPT + rawHtml;
-                  }
-                  webView.loadDataWithBaseURL("https://smartbolus.local/", fullHtml, "text/html", "UTF-8", null);
+              private void renderHtml(String rawHtml) {
+                  String full = rawHtml.contains("<head>") ? rawHtml.replace("<head>", "<head>" + BRIDGE_SCRIPT) : (BRIDGE_SCRIPT + rawHtml);
+                  webView.loadDataWithBaseURL("https://smartbolus.local/", full, "text/html", "UTF-8", null);
               }
 
-              private void fetchLatestHtmlFromServer(final boolean forceRender) {
+              private void fetchLatestHtml(final boolean force) {
                   new Thread(new Runnable() {
                       @Override
                       public void run() {
                           try {
-                              String baseUrl = prefs.getString("app_url", DEFAULT_URL);
-                              String apkUrl = baseUrl + (baseUrl.contains("?") ? "&" : "?") + "apk=1&_t=" + System.currentTimeMillis();
-                              final String html = fetchHttpUrl(apkUrl);
-
-                              if (html != null && html.contains("<!DOCTYPE html>") && !html.contains("sandboxFrame")) {
-                                  String oldHtml = prefs.getString("cached_html", "");
+                              String u = prefs.getString("app_url", DEFAULT_URL);
+                              final String html = fetchHttpUrl(u + (u.contains("?") ? "&" : "?") + "apk=1&_t=" + System.currentTimeMillis());
+                              if (html != null && html.contains("<!DOCTYPE html>")) {
+                                  String old = prefs.getString("cached_html", "");
                                   prefs.edit().putString("cached_html", html).apply();
-                                  if (forceRender || !html.equals(oldHtml)) {
-                                      mainHandler.post(new Runnable() {
-                                          @Override
-                                          public void run() {
-                                              renderHtmlInWebView(html);
-                                          }
-                                      });
+                                  if (force || !html.equals(old)) {
+                                      mainHandler.post(new Runnable() { @Override public void run() { renderHtml(html); } });
                                   }
                               }
-                          } catch (final Exception ignored) {}
+                          } catch (Exception ignored) {}
                       }
                   }).start();
               }
@@ -357,29 +247,24 @@ jobs:
               private String fetchHttpUrl(String urlStr) throws Exception {
                   URL url = new URL(urlStr);
                   HttpURLConnection conn = null;
-                  for (int redirects = 0; redirects < 6; redirects++) {
+                  for (int i = 0; i < 6; i++) {
                       conn = (HttpURLConnection) url.openConnection();
                       conn.setInstanceFollowRedirects(false);
                       conn.setConnectTimeout(15000);
                       conn.setReadTimeout(20000);
-                      conn.setRequestMethod("GET");
-                      int code = conn.getResponseCode();
-                      if (code == HttpURLConnection.HTTP_MOVED_TEMP || code == HttpURLConnection.HTTP_MOVED_PERM || code == HttpURLConnection.HTTP_SEE_OTHER || code == 307 || code == 308) {
+                      int c = conn.getResponseCode();
+                      if (c == 301 || c == 302 || c == 303 || c == 307 || c == 308) {
                           String loc = conn.getHeaderField("Location");
                           conn.disconnect();
                           url = new URL(url, loc);
-                      } else {
-                          break;
-                      }
+                      } else break;
                   }
                   InputStream is = (conn.getResponseCode() >= 400) ? conn.getErrorStream() : conn.getInputStream();
-                  BufferedReader reader = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8));
+                  BufferedReader r = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8));
                   StringBuilder sb = new StringBuilder();
                   String line;
-                  while ((line = reader.readLine()) != null) {
-                      sb.append(line).append("\n");
-                  }
-                  reader.close();
+                  while ((line = r.readLine()) != null) sb.append(line).append("\n");
+                  r.close();
                   conn.disconnect();
                   return sb.toString();
               }
@@ -387,45 +272,29 @@ jobs:
               public class WebAppInterface {
                   @JavascriptInterface
                   public void callServer(final int cbId, final String action, final String payload) {
-                      if ("addRecord".equals(action) && payload != null && !payload.isEmpty()) {
+                      if ("addRecord".equals(action) && payload != null) {
                           try {
                               JSONObject rec = new JSONObject(payload);
                               String type = rec.optString("type", "bolus");
                               if ("bolus".equals(type) || "food_only".equals(type)) {
                                   double units = rec.optDouble("units", 0);
                                   double xe = Double.parseDouble(rec.optString("xe", "0").replace(",", "."));
-                                  double carbs = Math.round(xe * 10.0);
-                                  String note = rec.optString("note", "Умный Болюс");
-                                  sendTreatmentToXDrip(units, carbs, note);
+                                  sendTreatmentToXDrip(units, Math.round(xe * 10.0), rec.optString("note", ""));
                               }
                           } catch (Exception ignored) {}
                       }
-
                       new Thread(new Runnable() {
                           @Override
                           public void run() {
                               try {
-                                  String baseUrl = prefs.getString("app_url", DEFAULT_URL);
-                                  String reqUrl = baseUrl + (baseUrl.contains("?") ? "&" : "?") +
-                                          "action=" + URLEncoder.encode(action, "UTF-8") +
-                                          "&data=" + URLEncoder.encode(payload != null ? payload : "", "UTF-8") +
-                                          "&_t=" + System.currentTimeMillis();
-                                  String res = fetchHttpUrl(reqUrl);
+                                  String u = prefs.getString("app_url", DEFAULT_URL);
+                                  String req = u + (u.contains("?") ? "&" : "?") + "action=" + URLEncoder.encode(action, "UTF-8") + "&data=" + URLEncoder.encode(payload != null ? payload : "", "UTF-8") + "&_t=" + System.currentTimeMillis();
+                                  String res = fetchHttpUrl(req);
                                   final String b64 = android.util.Base64.encodeToString(res.getBytes(StandardCharsets.UTF_8), android.util.Base64.NO_WRAP);
-                                  mainHandler.post(new Runnable() {
-                                      @Override
-                                      public void run() {
-                                          webView.evaluateJavascript("window._onAndroidServerResult(" + cbId + ", true, '" + b64 + "');", null);
-                                      }
-                                  });
-                              } catch (final Exception e) {
-                                  final String b64Err = android.util.Base64.encodeToString(e.toString().getBytes(StandardCharsets.UTF_8), android.util.Base64.NO_WRAP);
-                                  mainHandler.post(new Runnable() {
-                                      @Override
-                                      public void run() {
-                                          webView.evaluateJavascript("window._onAndroidServerResult(" + cbId + ", false, '" + b64Err + "');", null);
-                                      }
-                                  });
+                                  mainHandler.post(new Runnable() { @Override public void run() { webView.evaluateJavascript("window._onAndroidServerResult(" + cbId + ",true,'" + b64 + "');", null); } });
+                              } catch (Exception e) {
+                                  final String b64 = android.util.Base64.encodeToString(e.toString().getBytes(StandardCharsets.UTF_8), android.util.Base64.NO_WRAP);
+                                  mainHandler.post(new Runnable() { @Override public void run() { webView.evaluateJavascript("window._onAndroidServerResult(" + cbId + ",false,'" + b64 + "');", null); } });
                               }
                           }
                       }).start();
@@ -435,33 +304,30 @@ jobs:
               private synchronized void sendTreatmentToXDrip(final double insulin, final double carbs, final String notes) {
                   if (insulin <= 0 && carbs <= 0) return;
                   long now = System.currentTimeMillis();
-                  if (now - lastXdripSentTime < 2500) return;
+                  if (now - lastXdripSentTime < 2000) return;
                   lastXdripSentTime = now;
-
                   try {
                       SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US);
                       sdf.setTimeZone(TimeZone.getTimeZone("UTC"));
-
                       String rawUuid = UUID.randomUUID().toString();
-                      String mongoId = rawUuid.replace("-", "").substring(0, 24);
 
                       JSONObject tx = new JSONObject();
-                      tx.put("_id", mongoId);
+                      tx.put("_id", rawUuid.replace("-", "").substring(0, 24));
                       tx.put("uuid", rawUuid);
                       tx.put("timestamp", now);
-                      tx.put("date", now);
                       tx.put("created_at", sdf.format(new Date(now)));
-                      tx.put("eventType", (insulin > 0 && carbs > 0) ? "Meal Bolus" : (insulin > 0 ? "Correction Bolus" : "Carb Correction"));
-                      if (insulin > 0) tx.put("insulin", insulin);
-                      if (carbs > 0) tx.put("carbs", carbs);
-                      tx.put("notes", notes != null ? notes : "Умный Болюс");
+                      tx.put("eventType", "Treatment");
+                      tx.put("insulin", insulin);
+                      tx.put("carbs", carbs);
+                      tx.put("notes", notes != null ? notes : "");
                       tx.put("enteredBy", "NSClient");
 
                       JSONArray arr = new JSONArray();
                       arr.put(tx);
 
+                      // Прямая адресная доставка в приемник NSClientReceiver внутри xDrip+ (для Huawei/Honor)
                       Intent intent = new Intent("com.eveningoutpost.dexdrip.NS_EMULATOR");
-                      intent.setPackage("com.eveningoutpost.dexdrip");
+                      intent.setComponent(new ComponentName("com.eveningoutpost.dexdrip", "com.eveningoutpost.dexdrip.UtilityModels.NSClientReceiver"));
                       intent.putExtra("collection", "treatments");
                       intent.putExtra("data", arr.toString());
                       intent.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
@@ -470,10 +336,7 @@ jobs:
                       mainHandler.post(new Runnable() {
                           @Override
                           public void run() {
-                              String msg = "💉 Отправлено в xDrip+: " +
-                                      (insulin > 0 ? insulin + " ед. " : "") +
-                                      (carbs > 0 ? (int) carbs + " г угл." : "");
-                              Toast.makeText(getApplicationContext(), msg, Toast.LENGTH_LONG).show();
+                              Toast.makeText(getApplicationContext(), "💉 В xDrip+: " + insulin + " ед. / " + (int)carbs + " г угл.", Toast.LENGTH_SHORT).show();
                           }
                       });
                   } catch (Exception ignored) {}
@@ -482,18 +345,11 @@ jobs:
               @Override
               protected void onActivityResult(int requestCode, int resultCode, Intent data) {
                   super.onActivityResult(requestCode, resultCode, data);
-                  if (requestCode == FILE_CHOOSER_RESULT_CODE) {
-                      if (filePathCallback == null) return;
+                  if (requestCode == FILE_CHOOSER_RESULT_CODE && filePathCallback != null) {
                       Uri[] results = null;
                       if (resultCode == Activity.RESULT_OK) {
                           if (data != null && data.getDataString() != null) {
                               results = new Uri[]{Uri.parse(data.getDataString())};
-                          } else if (data != null && data.getClipData() != null) {
-                              ClipData clipData = data.getClipData();
-                              results = new Uri[clipData.getItemCount()];
-                              for (int i = 0; i < clipData.getItemCount(); i++) {
-                                  results[i] = clipData.getItemAt(i).getUri();
-                              }
                           } else if (cameraImageUri != null) {
                               results = new Uri[]{cameraImageUri};
                           }
@@ -505,56 +361,22 @@ jobs:
 
               @Override
               public void onBackPressed() {
-                  showMenuDialog();
-              }
-
-              private void showMenuDialog() {
-                  String[] options = {"🔄 Загрузить обновления с сервера", "🔗 Изменить ссылку скрипта", "🚪 Закрыть приложение"};
-                  new AlertDialog.Builder(this)
-                          .setTitle("Умный Болюс")
-                          .setItems(options, new DialogInterface.OnClickListener() {
-                              @Override
-                              public void onClick(DialogInterface dialog, int which) {
-                                  if (which == 0) {
-                                      Toast.makeText(MainActivity.this, "⏳ Обновление интерфейса...", Toast.LENGTH_SHORT).show();
-                                      fetchLatestHtmlFromServer(true);
-                                  } else if (which == 1) {
-                                      showUrlInputDialog();
-                                  } else if (which == 2) {
-                                      finish();
-                                  }
-                              }
-                          })
-                          .show();
-              }
-
-              private void showUrlInputDialog() {
-                  final EditText input = new EditText(this);
-                  input.setText(prefs.getString("app_url", DEFAULT_URL));
-                  new AlertDialog.Builder(this)
-                          .setTitle("Ссылка Google Apps Script")
-                          .setView(input)
-                          .setPositiveButton("Сохранить", new DialogInterface.OnClickListener() {
-                              @Override
-                              public void onClick(DialogInterface dialog, int which) {
-                                  String newUrl = input.getText().toString().trim();
-                                  if (!newUrl.isEmpty()) {
-                                      prefs.edit().putString("app_url", newUrl).remove("cached_html").apply();
-                                      fetchLatestHtmlFromServer(true);
-                                  }
-                              }
-                          })
-                          .setNegativeButton("Отмена", null)
-                          .show();
+                  String[] ops = {"🔄 Загрузить обновления с сервера", "🚪 Закрыть"};
+                  new AlertDialog.Builder(this).setTitle("Умный Болюс").setItems(ops, new DialogInterface.OnClickListener() {
+                      @Override
+                      public void onClick(DialogInterface d, int w) {
+                          if (w == 0) fetchLatestHtml(true);
+                          else finish();
+                      }
+                  }).show();
               }
           }
           EOF
 
-      - name: Build Debug APK
+      - name: Build APK
         run: gradle assembleDebug
 
-      - name: Upload SmartBolus APK
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: SmartBolus-APK
           path: app/build/outputs/apk/debug/app-debug.apk
