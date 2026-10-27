@@ -66,8 +66,8 @@ jobs:
                   applicationId "com.smartbolus.app"
                   minSdk 24
                   targetSdk 34
-                  versionCode 19
-                  versionName "1.7.3"
+                  versionCode 20
+                  versionName "1.7.4"
               }
 
               buildTypes {
@@ -89,10 +89,8 @@ jobs:
 
               <uses-permission android:name="android.permission.INTERNET" />
               <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-              <!-- Обязательное разрешение для отправки инсулина и углеводов в xDrip+ (NSClient) -->
               <uses-permission android:name="com.eveningoutpost.dexdrip.permissions.RECEIVE_NSCLIENT" />
 
-              <!-- Разрешение видимости пакета xDrip+ для Android 11 / 12 / 13 / 14 -->
               <queries>
                   <package android:name="com.eveningoutpost.dexdrip" />
               </queries>
@@ -282,6 +280,11 @@ jobs:
                           MainActivity.this.filePathCallback = filePathCallback;
 
                           try {
+                              // Создаем стандартный системный выбор файлов/фото (галерея + камера)
+                              Intent contentIntent = new Intent(Intent.ACTION_GET_CONTENT);
+                              contentIntent.addCategory(Intent.CATEGORY_OPENABLE);
+                              contentIntent.setType("image/*");
+
                               Intent captureIntent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
                               ContentValues values = new ContentValues();
                               values.put(MediaStore.Images.Media.TITLE, "smartbolus_" + System.currentTimeMillis() + ".jpg");
@@ -291,18 +294,10 @@ jobs:
                                   captureIntent.putExtra(MediaStore.EXTRA_OUTPUT, cameraImageUri);
                               }
 
-                              if (fileChooserParams != null && fileChooserParams.isCaptureEnabled() && cameraImageUri != null) {
-                                  startActivityForResult(captureIntent, FILE_CHOOSER_RESULT_CODE);
-                              } else {
-                                  Intent contentIntent = new Intent(Intent.ACTION_GET_CONTENT);
-                                  contentIntent.addCategory(Intent.CATEGORY_OPENABLE);
-                                  contentIntent.setType("image/*");
+                              Intent chooserIntent = Intent.createChooser(contentIntent, "Выберите фото или сделайте снимок");
+                              chooserIntent.putExtra(Intent.EXTRA_INITIAL_INTENTS, new Intent[]{captureIntent});
 
-                                  Intent chooserIntent = Intent.createChooser(contentIntent, "Выберите фото тарелки");
-                                  if (cameraImageUri != null) {
-                                      chooserIntent.putExtra(Intent.EXTRA_INITIAL_INTENTS, new Intent[]{captureIntent});
-                                  }
-                              }
+                              startActivityForResult(chooserIntent, FILE_CHOOSER_RESULT_CODE);
                               return true;
                           } catch (Exception e) {
                               MainActivity.this.filePathCallback = null;
@@ -440,7 +435,6 @@ jobs:
               private synchronized void sendTreatmentToXDrip(final double insulin, final double carbs, final String notes) {
                   if (insulin <= 0 && carbs <= 0) return;
                   long now = System.currentTimeMillis();
-                  // Защита от двойной отправки одной и той же записи
                   if (now - lastXdripSentTime < 2500) return;
                   lastXdripSentTime = now;
 
