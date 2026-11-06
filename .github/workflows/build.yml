@@ -21,7 +21,6 @@ jobs:
       - name: Generate Project
         run: |
           mkdir -p app/src/main/java/com/smartbolus/app
-          mkdir -p app/src/main/java/com/eveningoutpost/dexdrip/services/broadcastservice/models
 
           cat << 'EOF' > settings.gradle
           pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
@@ -43,8 +42,8 @@ jobs:
                   applicationId "com.smartbolus.app"
                   minSdk 24
                   targetSdk 34
-                  versionCode 28
-                  versionName "1.8.2"
+                  versionCode 30
+                  versionName "2.0.0"
               }
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
@@ -60,9 +59,8 @@ jobs:
               <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
               <queries>
-                  <package android:name="com.eveningoutpost.dexdrip" />
-                  <intent><action android:name="com.eveningoutpost.dexdrip.watch.wearintegration.BROADCAST_SERVICE_RECEIVER" /></intent>
                   <intent><action android:name="android.media.action.IMAGE_CAPTURE" /></intent>
+                  <intent><action android:name="android.speech.action.RECOGNIZE_SPEECH" /></intent>
               </queries>
 
               <application
@@ -85,65 +83,11 @@ jobs:
           </manifest>
           EOF
 
-          cat << 'EOF' > app/src/main/java/com/eveningoutpost/dexdrip/services/broadcastservice/models/Settings.java
-          package com.eveningoutpost.dexdrip.services.broadcastservice.models;
-
-          import android.os.Parcel;
-          import android.os.Parcelable;
-
-          public class Settings implements Parcelable {
-              private int graphStartOffset;
-              private int graphEndOffset;
-              private String apkName;
-              private boolean displayGraph;
-
-              public Settings(int graphStartOffset, int graphEndOffset, String apkName, boolean displayGraph) {
-                  this.graphStartOffset = graphStartOffset;
-                  this.graphEndOffset = graphEndOffset;
-                  this.apkName = apkName;
-                  this.displayGraph = displayGraph;
-              }
-
-              protected Settings(Parcel in) {
-                  graphStartOffset = in.readInt();
-                  graphEndOffset = in.readInt();
-                  apkName = in.readString();
-                  displayGraph = in.readByte() != 0;
-              }
-
-              public static final Creator<Settings> CREATOR = new Creator<Settings>() {
-                  @Override
-                  public Settings createFromParcel(Parcel in) {
-                      return new Settings(in);
-                  }
-
-                  @Override
-                  public Settings[] newArray(int size) {
-                      return new Settings[size];
-                  }
-              };
-
-              @Override
-              public int describeContents() {
-                  return 0;
-              }
-
-              @Override
-              public void writeToParcel(Parcel dest, int flags) {
-                  dest.writeInt(graphStartOffset);
-                  dest.writeInt(graphEndOffset);
-                  dest.writeString(apkName);
-                  dest.writeByte((byte) (displayGraph ? 1 : 0));
-              }
-          }
-          EOF
-
           cat << 'EOF' > app/src/main/java/com/smartbolus/app/MainActivity.java
           package com.smartbolus.app;
 
           import android.app.Activity;
           import android.app.AlertDialog;
-          import android.content.ComponentName;
           import android.content.ContentValues;
           import android.content.Context;
           import android.content.DialogInterface;
@@ -154,6 +98,7 @@ jobs:
           import android.os.Handler;
           import android.os.Looper;
           import android.provider.MediaStore;
+          import android.speech.RecognizerIntent;
           import android.webkit.CookieManager;
           import android.webkit.JavascriptInterface;
           import android.webkit.ValueCallback;
@@ -164,8 +109,6 @@ jobs:
           import android.webkit.WebView;
           import android.webkit.WebViewClient;
           import android.widget.Toast;
-          import com.eveningoutpost.dexdrip.services.broadcastservice.models.Settings;
-          import org.json.JSONObject;
           import java.io.BufferedReader;
           import java.io.ByteArrayInputStream;
           import java.io.InputStream;
@@ -175,6 +118,7 @@ jobs:
           import java.net.URLEncoder;
           import java.nio.charset.StandardCharsets;
           import java.text.SimpleDateFormat;
+          import java.util.ArrayList;
           import java.util.Calendar;
           import java.util.Date;
           import java.util.HashMap;
@@ -184,16 +128,13 @@ jobs:
           public class MainActivity extends Activity {
               private static final String DEFAULT_URL = "https://script.google.com/macros/s/AKfycby8RIP5UPNigRwb0jX6fSSVgS5O6WlyZmPS26LvTsAZI7hhthdtDcFHnEFNcPeF2nW_Aw/exec";
               private static final int FILE_CHOOSER_RESULT_CODE = 1001;
-              private static final String XDRIP_PKG = "com.eveningoutpost.dexdrip";
-              private static final String ACTION_BS = "com.eveningoutpost.dexdrip.watch.wearintegration.BROADCAST_SERVICE_RECEIVER";
-              private static final String CLS_BS_ENTRY = "com.eveningoutpost.dexdrip.services.broadcastservice.BroadcastEntry";
+              private static final int VOICE_RESULT_CODE = 1002;
 
               private WebView webView;
               private ValueCallback<Uri[]> filePathCallback;
               private Uri cameraImageUri;
               private SharedPreferences prefs;
               private final Handler mainHandler = new Handler(Looper.getMainLooper());
-              private long lastXdripSentTime = 0;
 
               private static final String BRIDGE_SCRIPT =
                       "<script>(function(){" +
@@ -220,8 +161,6 @@ jobs:
 
                   CookieManager.getInstance().setAcceptCookie(true);
                   webView.addJavascriptInterface(new WebAppInterface(), "AndroidBridge");
-
-                  sendXdripRegister();
 
                   webView.setWebViewClient(new WebViewClient() {
                       @Override
@@ -275,19 +214,6 @@ jobs:
                   } else {
                       fetchLatestHtml(true);
                   }
-              }
-
-              private void sendXdripRegister() {
-                  try {
-                      Settings xdripSettings = new Settings(0, 0, "Умный Болюс", false);
-                      Intent reg = new Intent(ACTION_BS);
-                      reg.setComponent(new ComponentName(XDRIP_PKG, CLS_BS_ENTRY));
-                      reg.putExtra("PACKAGE", getPackageName());
-                      reg.putExtra("FUNCTION", "set_settings");
-                      reg.putExtra("SETTINGS", xdripSettings);
-                      reg.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES | Intent.FLAG_RECEIVER_FOREGROUND);
-                      sendBroadcast(reg);
-                  } catch (Exception ignored) {}
               }
 
               private void renderHtml(String rawHtml) {
@@ -352,19 +278,26 @@ jobs:
                   }
 
                   @JavascriptInterface
-                  public void callServer(final int cbId, final String action, final String payload) {
-                      if ("addRecord".equals(action) && payload != null) {
-                          try {
-                              JSONObject rec = new JSONObject(payload);
-                              String type = rec.optString("type", "bolus");
-                              if ("bolus".equals(type) || "food_only".equals(type)) {
-                                  double units = rec.optDouble("units", 0);
-                                  double xe = Double.parseDouble(rec.optString("xe", "0").replace(",", "."));
-                                  double carbs = rec.has("carbs") ? rec.optDouble("carbs", Math.round(xe * 10.0)) : Math.round(xe * 10.0);
-                                  sendTreatmentToXDrip(units, carbs);
+                  public void startVoice() {
+                      mainHandler.post(new Runnable() {
+                          @Override
+                          public void run() {
+                              try {
+                                  Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+                                  intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+                                  intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ru-RU");
+                                  intent.putExtra(RecognizerIntent.EXTRA_PROMPT, "Скажите блюдо (например: пюре 150 и котлета)");
+                                  startActivityForResult(intent, VOICE_RESULT_CODE);
+                              } catch (Exception e) {
+                                  webView.evaluateJavascript("if(window._onAndroidVoiceResult) window._onAndroidVoiceResult('');", null);
+                                  Toast.makeText(MainActivity.this, "На телефоне не установлен голосовой ввод (Google/Яндекс)", Toast.LENGTH_LONG).show();
                               }
-                          } catch (Exception ignored) {}
-                      }
+                          }
+                      });
+                  }
+
+                  @JavascriptInterface
+                  public void callServer(final int cbId, final String action, final String payload) {
                       new Thread(new Runnable() {
                           @Override
                           public void run() {
@@ -383,36 +316,6 @@ jobs:
                   }
               }
 
-              private synchronized void sendTreatmentToXDrip(final double insulin, final double carbs) {
-                  if (insulin <= 0 && carbs <= 0) return;
-                  final long now = System.currentTimeMillis();
-                  if (now - lastXdripSentTime < 2000) return;
-                  lastXdripSentTime = now;
-
-                  // Шаг 1: Регистрация с родным классом Settings из xDrip+
-                  sendXdripRegister();
-
-                  // Шаг 2: Пауза ровно 1.5 сек (чтобы анти-спам xDrip+ не сбросил команду) и отправка записи
-                  mainHandler.postDelayed(new Runnable() {
-                      @Override
-                      public void run() {
-                          try {
-                              Intent bsIntent = new Intent(ACTION_BS);
-                              bsIntent.setComponent(new ComponentName(XDRIP_PKG, CLS_BS_ENTRY));
-                              bsIntent.putExtra("PACKAGE", getPackageName());
-                              bsIntent.putExtra("FUNCTION", "add_treatment");
-                              bsIntent.putExtra("carbs", (double) carbs);
-                              bsIntent.putExtra("insulin", (double) insulin);
-                              bsIntent.putExtra("timeStamp", (long) now);
-                              bsIntent.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES | Intent.FLAG_RECEIVER_FOREGROUND);
-                              sendBroadcast(bsIntent);
-
-                              Toast.makeText(getApplicationContext(), "💉 Отправлено в xDrip+: " + insulin + " ед. / " + (int)carbs + " г угл.", Toast.LENGTH_SHORT).show();
-                          } catch (Exception ignored) {}
-                      }
-                  }, 1500);
-              }
-
               @Override
               protected void onActivityResult(int requestCode, int resultCode, Intent data) {
                   super.onActivityResult(requestCode, resultCode, data);
@@ -427,6 +330,16 @@ jobs:
                       }
                       filePathCallback.onReceiveValue(results);
                       filePathCallback = null;
+                  }
+                  if (requestCode == VOICE_RESULT_CODE) {
+                      String spoken = "";
+                      if (resultCode == Activity.RESULT_OK && data != null) {
+                          ArrayList<String> matches = data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS);
+                          if (matches != null && !matches.isEmpty()) {
+                              spoken = matches.get(0).replace("'", "\\'");
+                          }
+                      }
+                      webView.evaluateJavascript("if(window._onAndroidVoiceResult) window._onAndroidVoiceResult('" + spoken + "');", null);
                   }
               }
 
